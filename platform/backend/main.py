@@ -116,6 +116,21 @@ def health_check():
     return {"status": "ok", "service": "dazai-detector-backend"}
 
 
+@app.get("/debug")
+def debug_info():
+    import os
+    return {
+        "project_root": str(config.PROJECT_ROOT),
+        "alerts_path": str(config.ALERTS_PATH),
+        "alerts_exists": config.ALERTS_PATH.exists(),
+        "chroma_dir": str(config.CHROMA_DIR),
+        "chroma_exists": (config.CHROMA_DIR / "chroma.sqlite3").exists(),
+        "reports_dir": str(config.REPORTS_DIR),
+        "cwd": os.getcwd(),
+        "sys_path_0": str(config.PROJECT_ROOT),
+    }
+
+
 if __name__ == "__main__":
     import os
 
