@@ -17,7 +17,7 @@ services:
       - key: LLM_API_KEY
         sync: false   # set manually in Render dashboard (secret)
       - key: BACKEND_CORS_ORIGINS
-        value: https://dazai-detector.pages.dev
+        value: https://dazai-detector.pages.dev,http://localhost:5173
       - key: PYTHONUNBUFFERED
         value: "1"
       - key: PYTHONDONTWRITEBYTECODE
