@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: dazai-detector-backend
+    runtime: python
+    region: oregon
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python platform/backend/main.py
+    healthCheckPath: /
+    envVars:
+      - key: LLM_PROVIDER
+        value: openai
+      - key: LLM_MODEL
+        value: llama-3.3-70b-versatile
+      - key: LLM_BASE_URL
+        value: https://api.groq.com/openai/v1
+      - key: LLM_API_KEY
+        sync: false   # set manually in Render dashboard (secret)
+      - key: BACKEND_CORS_ORIGINS
+        value: https://dazai-detector.pages.dev
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: PYTHONDONTWRITEBYTECODE
+        value: "1"
