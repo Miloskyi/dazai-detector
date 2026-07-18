@@ -1,0 +1,13 @@
+.venv
+.git
+node_modules
+platform/frontend/node_modules
+platform/frontend/dist
+data/raw/*.csv
+data/processed
+data/outputs
+intelligence/pipeline/artifacts
+intelligence/notebooks
+**/__pycache__
+**/*.pyc
+.env

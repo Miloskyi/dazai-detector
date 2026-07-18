@@ -1,0 +1,65 @@
+services:
+  # One-shot: builds the dataset, trains + scores the hybrid model, generates
+  # the first report, and ingests alerts into ChromaDB. Everything it writes
+  # lands on the bind-mounted ./data and ./intelligence/pipeline/artifacts, so
+  # backend/mcp_server see it immediately after this container exits.
+  pipeline:
+    build:
+      context: .
+      dockerfile: docker/python.Dockerfile
+    volumes:
+      - ./data:/app/data
+      - ./intelligence/pipeline/artifacts:/app/intelligence/pipeline/artifacts
+    command: >
+      sh -c "python intelligence/pipeline/make_sample.py &&
+             python intelligence/pipeline/run_pipeline.py &&
+             python platform/backend/services/report_service.py &&
+             python platform/rag/ingest.py"
+
+  backend:
+    build:
+      context: .
+      dockerfile: docker/python.Dockerfile
+    depends_on:
+      pipeline:
+        condition: service_completed_successfully
+    volumes:
+      - ./data:/app/data
+      - ./intelligence/pipeline/artifacts:/app/intelligence/pipeline/artifacts
+    environment:
+      LLM_PROVIDER: ${LLM_PROVIDER:-none}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com/v1}
+      BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS:-http://localhost:5173}
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    command: ["python", "platform/backend/main.py"]
+
+  mcp_server:
+    build:
+      context: .
+      dockerfile: docker/python.Dockerfile
+    depends_on:
+      pipeline:
+        condition: service_completed_successfully
+    volumes:
+      - ./data:/app/data
+      - ./intelligence/pipeline/artifacts:/app/intelligence/pipeline/artifacts
+    environment:
+      MCP_TRANSPORT: http
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: 8001
+    ports:
+      - "${MCP_HOST_PORT:-8001}:8001"
+    command: ["python", "platform/mcp_server/server.py"]
+
+  frontend:
+    build:
+      context: ./platform/frontend
+      args:
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
+    depends_on:
+      - backend
+    ports:
+      - "${FRONTEND_PORT:-5173}:80"
