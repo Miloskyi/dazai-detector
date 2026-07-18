@@ -1,14 +1,9 @@
-"""FastAPI application entry point.
-
-Run with: python platform/backend/main.py
-
-On platforms like Render (free tier) the filesystem is ephemeral — artifacts
-and ChromaDB are lost on every restart.  The startup handler below detects this
-and re-runs the full pipeline before serving any traffic, so the service is
-always self-healing regardless of deployment environment.
-"""
+"""FastAPI application entry point."""
 
 import sys
+import threading
+import traceback
+import os
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -26,73 +21,75 @@ from backend.api.routes import alerts, chat, reports, stats
 from intelligence.pipeline import config
 
 
-def _bootstrap() -> None:
-    """Run the full pipeline + RAG ingest if outputs are missing."""
-    import traceback
-
-    print(f"[startup] PROJECT_ROOT = {config.PROJECT_ROOT}")
-    print(f"[startup] ALERTS_PATH  = {config.ALERTS_PATH}")
-    print(f"[startup] CHROMA_DIR   = {config.CHROMA_DIR}")
-
-    alerts_missing = not config.ALERTS_PATH.exists()
-    chroma_missing = not (config.CHROMA_DIR / "chroma.sqlite3").exists()
-    report_missing = (
-        not any(config.REPORTS_DIR.glob("*.json"))
-        if config.REPORTS_DIR.exists()
-        else True
-    )
-
-    print(f"[startup] alerts_missing={alerts_missing} chroma_missing={chroma_missing} report_missing={report_missing}")
-
-    if not (alerts_missing or chroma_missing or report_missing):
-        print("[startup] All artifacts present — skipping bootstrap.")
-        return
-
-    print("[startup] Running bootstrap pipeline...")
+def _run_bootstrap() -> None:
+    """Run the full pipeline in a background thread so the server starts immediately.
+    Render free tier kills processes that don't bind a port within ~60s.
+    Running the pipeline (~2-3 min) in a thread avoids that timeout.
+    """
     try:
-        # 1. Ensure output dirs exist
+        print(f"[bootstrap] PROJECT_ROOT = {config.PROJECT_ROOT}")
+        print(f"[bootstrap] cwd          = {os.getcwd()}")
+        print(f"[bootstrap] ALERTS_PATH  = {config.ALERTS_PATH}")
+        print(f"[bootstrap] CHROMA_DIR   = {config.CHROMA_DIR}")
+
+        alerts_ok = config.ALERTS_PATH.exists()
+        chroma_ok = (config.CHROMA_DIR / "chroma.sqlite3").exists()
+        report_ok = (
+            config.REPORTS_DIR.exists()
+            and any(config.REPORTS_DIR.glob("*.json"))
+        )
+
+        print(f"[bootstrap] alerts_ok={alerts_ok} chroma_ok={chroma_ok} report_ok={report_ok}")
+
+        if alerts_ok and chroma_ok and report_ok:
+            print("[bootstrap] All artifacts present — skipping.")
+            return
+
+        print("[bootstrap] Starting pipeline...")
+
+        # Ensure dirs exist
         config.OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
         config.REPORTS_DIR.mkdir(parents=True, exist_ok=True)
         config.ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
         (config.PROJECT_ROOT / "data" / "processed").mkdir(parents=True, exist_ok=True)
 
-        # 2. Generate synthetic dataset
-        print("[startup] Step 1/4: generating synthetic dataset...")
+        # Step 1: synthetic dataset
+        print("[bootstrap] 1/4 generating dataset...")
         from intelligence.pipeline.make_sample import main as make_sample
         make_sample()
-        print(f"[startup] Dataset written to {config.PROCESSED_DATA_PATH}")
 
-        # 3. Run hybrid model pipeline → alerts.json
-        print("[startup] Step 2/4: running hybrid pipeline...")
+        # Step 2: hybrid model + alerts.json
+        print("[bootstrap] 2/4 running hybrid pipeline...")
         from intelligence.pipeline.run_pipeline import main as run_pipeline
         run_pipeline()
-        print(f"[startup] Alerts written: {config.ALERTS_PATH.exists()}")
+        print(f"[bootstrap] alerts.json exists: {config.ALERTS_PATH.exists()}")
 
-        # 4. Generate first report
-        print("[startup] Step 3/4: generating report...")
+        # Step 3: report
+        print("[bootstrap] 3/4 generating report...")
         from backend.services.report_service import generate_report
         from backend.repositories.report_repository import ReportRepository
         from datetime import datetime, timezone
         report = generate_report()
-        report_id = f"report_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}"
-        ReportRepository().save(report_id, report.to_dict(), report.to_markdown())
-        print("[startup] Report saved.")
+        rid = f"report_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}"
+        ReportRepository().save(rid, report.to_dict(), report.to_markdown())
 
-        # 5. Ingest alerts into ChromaDB
-        print("[startup] Step 4/4: ingesting into ChromaDB...")
+        # Step 4: ChromaDB ingest
+        print("[bootstrap] 4/4 ingesting into ChromaDB...")
+        # rag package lives at platform/rag — _PLATFORM_DIR already in sys.path
         from rag.ingest import AlertIngestor
         count = AlertIngestor().run()
-        print(f"[startup] Bootstrap complete — {count} alerts ingested.")
+        print(f"[bootstrap] Done — {count} alerts ingested.")
 
     except Exception:
-        print("[startup] ERROR during bootstrap:")
+        print("[bootstrap] FAILED:")
         traceback.print_exc()
-        print("[startup] Service will start with empty data.")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    _bootstrap()
+    # Start bootstrap in background — server binds port immediately
+    t = threading.Thread(target=_run_bootstrap, daemon=True)
+    t.start()
     yield
 
 
@@ -118,22 +115,17 @@ def health_check():
 
 @app.get("/debug")
 def debug_info():
-    import os
     return {
         "project_root": str(config.PROJECT_ROOT),
         "alerts_path": str(config.ALERTS_PATH),
         "alerts_exists": config.ALERTS_PATH.exists(),
-        "chroma_dir": str(config.CHROMA_DIR),
+        "chroma_sqlite": str(config.CHROMA_DIR / "chroma.sqlite3"),
         "chroma_exists": (config.CHROMA_DIR / "chroma.sqlite3").exists(),
-        "reports_dir": str(config.REPORTS_DIR),
         "cwd": os.getcwd(),
-        "sys_path_0": str(config.PROJECT_ROOT),
+        "sys_path": sys.path[:4],
     }
 
 
 if __name__ == "__main__":
-    import os
-
     import uvicorn
-
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
