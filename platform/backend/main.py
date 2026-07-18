@@ -27,41 +27,67 @@ from intelligence.pipeline import config
 
 
 def _bootstrap() -> None:
-    """Run the full pipeline + RAG ingest if outputs are missing.
+    """Run the full pipeline + RAG ingest if outputs are missing."""
+    import traceback
 
-    This makes the service self-healing on platforms with ephemeral filesystems
-    (Render free tier, any container without a persistent volume).  The check is
-    fast when artifacts are already present (just a file-existence test).
-    """
+    print(f"[startup] PROJECT_ROOT = {config.PROJECT_ROOT}")
+    print(f"[startup] ALERTS_PATH  = {config.ALERTS_PATH}")
+    print(f"[startup] CHROMA_DIR   = {config.CHROMA_DIR}")
+
     alerts_missing = not config.ALERTS_PATH.exists()
     chroma_missing = not (config.CHROMA_DIR / "chroma.sqlite3").exists()
-    report_missing = not any(config.REPORTS_DIR.glob("*.json")) if config.REPORTS_DIR.exists() else True
+    report_missing = (
+        not any(config.REPORTS_DIR.glob("*.json"))
+        if config.REPORTS_DIR.exists()
+        else True
+    )
 
-    if alerts_missing or chroma_missing or report_missing:
-        print("[startup] Artifacts missing — running bootstrap pipeline...")
+    print(f"[startup] alerts_missing={alerts_missing} chroma_missing={chroma_missing} report_missing={report_missing}")
 
-        # 1. Generate synthetic dataset if no raw CSV present
+    if not (alerts_missing or chroma_missing or report_missing):
+        print("[startup] All artifacts present — skipping bootstrap.")
+        return
+
+    print("[startup] Running bootstrap pipeline...")
+    try:
+        # 1. Ensure output dirs exist
+        config.OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+        config.REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        config.ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+        (config.PROJECT_ROOT / "data" / "processed").mkdir(parents=True, exist_ok=True)
+
+        # 2. Generate synthetic dataset
+        print("[startup] Step 1/4: generating synthetic dataset...")
         from intelligence.pipeline.make_sample import main as make_sample
         make_sample()
+        print(f"[startup] Dataset written to {config.PROCESSED_DATA_PATH}")
 
-        # 2. Run hybrid model pipeline → alerts.json
+        # 3. Run hybrid model pipeline → alerts.json
+        print("[startup] Step 2/4: running hybrid pipeline...")
         from intelligence.pipeline.run_pipeline import main as run_pipeline
         run_pipeline()
+        print(f"[startup] Alerts written: {config.ALERTS_PATH.exists()}")
 
-        # 3. Generate first report
+        # 4. Generate first report
+        print("[startup] Step 3/4: generating report...")
         from backend.services.report_service import generate_report
         from backend.repositories.report_repository import ReportRepository
         from datetime import datetime, timezone
         report = generate_report()
         report_id = f"report_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}"
         ReportRepository().save(report_id, report.to_dict(), report.to_markdown())
+        print("[startup] Report saved.")
 
-        # 4. Ingest alerts into ChromaDB
+        # 5. Ingest alerts into ChromaDB
+        print("[startup] Step 4/4: ingesting into ChromaDB...")
         from rag.ingest import AlertIngestor
         count = AlertIngestor().run()
         print(f"[startup] Bootstrap complete — {count} alerts ingested.")
-    else:
-        print("[startup] Artifacts present — skipping bootstrap.")
+
+    except Exception:
+        print("[startup] ERROR during bootstrap:")
+        traceback.print_exc()
+        print("[startup] Service will start with empty data.")
 
 
 @asynccontextmanager
