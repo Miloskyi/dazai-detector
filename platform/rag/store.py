@@ -16,6 +16,9 @@ class _HashEmbedding:
     """384-dim TF-IDF-style hash embedding. No downloads, no RAM spike."""
     DIM = 384
 
+    def name(self) -> str:
+        return "hash_embed"
+
     def __call__(self, input: List[str]) -> List[List[float]]:
         result = []
         for text in input:
